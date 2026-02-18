@@ -296,8 +296,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 </div>
 
 <script>
-const GROK_KEY = 'xai-DNFpK1AocoKOSnvu3fvzu2y5UkBYuWNpNnL2GrfJT3V0H1RLjMFmbXgi3OSdqv8TyNEP2Xovx6GatfFu';
-const GROK_URL = 'https://api.x.ai/v1/chat/completions';
+const GROK_URL = 'https://grokapi.joniturbu.workers.dev';
 
 const SYSTEM = `Eres Hamish, guía escocés de 60 años. Gruñón pero con chispa y amor genuino por Escocia. 
 Llevas toda la vida en las Highlands. Hablas en español pero con giros propios: nunca dices "de acuerdo", dices "como quieras, ya te lo advertí".
@@ -356,7 +355,7 @@ async function askGrok(msg, sys) {
   try {
     const r = await fetch(GROK_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${GROK_KEY}`},
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         model:'grok-3-mini', max_tokens:220,
         messages:[{role:'system',content:sys||SYSTEM},{role:'user',content:msg}]
