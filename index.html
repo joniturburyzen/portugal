@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Alien House Explorer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; }
+    canvas { display: block; }
+
+    /* ── Pantalla de carga (solo mientras carga el alien <1s) ── */
+    #splash {
+      position: fixed; inset: 0;
+      background: linear-gradient(135deg, #060614, #120825, #060614);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 100;
+      transition: opacity 0.6s ease;
+    }
+    #splash h1 {
+      color: #88ddff; font-size: 2.4rem; letter-spacing: 6px;
+      text-transform: uppercase; margin-bottom: 8px;
+      text-shadow: 0 0 30px rgba(136,221,255,0.5);
+    }
+    #splash p { color: #5577aa; font-size: 0.8rem; letter-spacing: 3px; margin-bottom: 32px; }
+    #splash-bar { width: 280px; height: 3px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
+    #splash-fill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #44aaff, #cc88ff);
+      transition: width 0.3s ease;
+    }
+    #splash-txt { color: #334455; margin-top: 10px; font-size: 0.72rem; letter-spacing: 2px; }
+
+    /* ── Mini barra de progreso (esquina, house cargando) ── */
+    #house-bar {
+      position: fixed; bottom: 60px; right: 20px;
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 10px 14px;
+      min-width: 180px;
+      display: none;
+      z-index: 50;
+    }
+    #house-bar-label { color: #88aacc; font-size: 0.72rem; letter-spacing: 1px; margin-bottom: 6px; }
+    #house-bar-track { height: 3px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
+    #house-bar-fill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #44aaff, #cc88ff, #44aaff);
+      background-size: 200%;
+      animation: shimmer 1.5s linear infinite;
+      transition: width 0.4s ease;
+    }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    #house-bar-pct { color: #445566; font-size: 0.68rem; margin-top: 4px; text-align: right; }
+
+    /* ── HUD controles ── */
+    #controls {
+      position: fixed; bottom: 18px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.6);
+      padding: 9px 22px; border-radius: 999px;
+      font-size: 0.78rem; white-space: nowrap;
+      pointer-events: none; letter-spacing: 1px;
+    }
+    #controls span { color: #88ddff; margin: 0 3px; }
+  </style>
+</head>
+<body>
+
+<!-- Splash: solo mientras carga el alien (rápido) -->
+<div id="splash">
+  <h1>Alien House</h1>
+  <p>Explorer</p>
+  <div id="splash-bar"><div id="splash-fill"></div></div>
+  <div id="splash-txt">Cargando personaje…</div>
+</div>
+
+<!-- Mini barra: mientras la casa se descarga en background -->
+<div id="house-bar">
+  <div id="house-bar-label">Cargando casa…</div>
+  <div id="house-bar-track"><div id="house-bar-fill"></div></div>
+  <div id="house-bar-pct">0%</div>
+</div>
+
+<!-- HUD -->
+<div id="controls">
+  <span>WASD</span> Mover &nbsp;·&nbsp;
+  <span>Ratón</span> Cámara &nbsp;·&nbsp;
+  <span>Rueda</span> Zoom
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDERER
+// ═══════════════════════════════════════════════════════════════
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// ═══════════════════════════════════════════════════════════════
+//  SCENE
+// ═══════════════════════════════════════════════════════════════
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xc8dff0);
+scene.fog = new THREE.Fog(0xc8dff0, 25, 70);
+
+// ═══════════════════════════════════════════════════════════════
+//  CAMERA
+// ═══════════════════════════════════════════════════════════════
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.05, 200);
+camera.position.set(0, 3, 6);
+
+// ═══════════════════════════════════════════════════════════════
+//  LIGHTING
+// ═══════════════════════════════════════════════════════════════
+scene.add(new THREE.AmbientLight(0xffeedd, 0.6));
+
+const sun = new THREE.DirectionalLight(0xfff5e0, 1.8);
+sun.position.set(8, 15, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { near: 0.5, far: 80, left: -25, right: 25, top: 25, bottom: -25 });
+sun.shadow.bias = -0.001;
+scene.add(sun);
+
+scene.add(new THREE.DirectionalLight(0xaacce8, 0.5)).position.set(-10, 8, -12);
+scene.add(new THREE.HemisphereLight(0xfff0cc, 0x334455, 0.4));
+
+// ═══════════════════════════════════════════════════════════════
+//  TEMP FLOOR (visible mientras la casa no ha cargado)
+// ═══════════════════════════════════════════════════════════════
+const tempFloor = new THREE.Mesh(
+  new THREE.PlaneGeometry(30, 30),
+  new THREE.MeshStandardMaterial({ color: 0xddeeff, roughness: 0.9, metalness: 0 })
+);
+tempFloor.rotation.x = -Math.PI / 2;
+tempFloor.receiveShadow = true;
+scene.add(tempFloor);
+
+// ═══════════════════════════════════════════════════════════════
+//  ESTADO
+// ═══════════════════════════════════════════════════════════════
+let alien = null;
+const alienPos    = new THREE.Vector3();
+let   alienRotY   = 0;
+let   walkPhase   = 0;
+let   isMoving    = false;
+let   baseScaleY  = 1;  // para squish sin romper escala
+
+let camAngle = 0.3, camPitch = 0.35, camDist = 5;
+const camTargetPos = new THREE.Vector3();
+
+let bounds = { minX: -12, maxX: 12, minZ: -12, maxZ: 12 };
+
+// ═══════════════════════════════════════════════════════════════
+//  INPUT
+// ═══════════════════════════════════════════════════════════════
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
+
+let isDragging = false, lastX = 0, lastY = 0;
+const onPointerDown = (x, y) => { isDragging = true; lastX = x; lastY = y; };
+const onPointerMove = (x, y) => {
+  if (!isDragging) return;
+  camAngle -= (x - lastX) * 0.005;
+  camPitch  = Math.max(0.08, Math.min(1.3, camPitch - (y - lastY) * 0.005));
+  lastX = x; lastY = y;
+};
+renderer.domElement.addEventListener('mousedown', e => onPointerDown(e.clientX, e.clientY));
+window.addEventListener('mouseup',   () => isDragging = false);
+window.addEventListener('mousemove', e => onPointerMove(e.clientX, e.clientY));
+renderer.domElement.addEventListener('touchstart', e => onPointerDown(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+window.addEventListener('touchend',  () => isDragging = false);
+window.addEventListener('touchmove', e => onPointerMove(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+renderer.domElement.addEventListener('wheel', e => {
+  camDist = Math.max(1.5, Math.min(12, camDist + e.deltaY * 0.012));
+}, { passive: true });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  FASE 1: ALIEN primero (1.2 MB — rápido)
+// ═══════════════════════════════════════════════════════════════
+const gltfLoader = new GLTFLoader();
+gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+
+const splashFill = document.getElementById('splash-fill');
+const splashTxt  = document.getElementById('splash-txt');
+
+gltfLoader.load(
+  'cute_alien_character.glb',
+  gltf => {
+    alien = gltf.scene;
+
+    // Auto-fit a 1.4 unidades de altura
+    const box  = new THREE.Box3().setFromObject(alien);
+    const size = box.getSize(new THREE.Vector3());
+    const s    = 1.4 / Math.max(size.x, size.y, size.z);
+    alien.scale.setScalar(s);
+    baseScaleY = s;
+
+    // Ancla al suelo
+    const box2 = new THREE.Box3().setFromObject(alien);
+    alien.position.y = -box2.min.y;
+
+    alien.traverse(c => {
+      if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
+    });
+    scene.add(alien);
+
+    // ── Alien listo: ocultar splash → empezar a jugar YA ──
+    const splash = document.getElementById('splash');
+    splash.style.opacity = '0';
+    setTimeout(() => { splash.style.display = 'none'; }, 650);
+
+    // ── Fase 2: cargar la casa en background (worker) ──
+    loadHouseholdInWorker();
+  },
+  xhr => {
+    if (xhr.total > 0) {
+      const p = (xhr.loaded / xhr.total) * 100;
+      splashFill.style.width = p + '%';
+      splashTxt.innerText = `Cargando personaje… ${Math.round(p)}%`;
+    }
+  },
+  err => console.error('[alien]', err)
+);
+
+// ═══════════════════════════════════════════════════════════════
+//  FASE 2: HOUSEHOLD en Web Worker + caché IndexedDB (52 MB)
+// ═══════════════════════════════════════════════════════════════
+function loadHouseholdInWorker() {
+  const houseBarEl   = document.getElementById('house-bar');
+  const houseBarFill = document.getElementById('house-bar-fill');
+  const houseBarPct  = document.getElementById('house-bar-pct');
+  houseBarEl.style.display = 'block';
+
+  const worker = new Worker('glb-worker.js');
+
+  const houseURL  = new URL('household_final.glb', location.href).href;
+  const cacheKey  = 'household_final_v1';
+  worker.postMessage({ url: houseURL, cacheKey });
+
+  worker.onmessage = e => {
+    const { type, loaded, total, buffer, msg } = e.data;
+
+    if (type === 'cached') {
+      // Viene de IndexedDB — cargar directamente sin barra de progreso
+      houseBarEl.querySelector('#house-bar-label').innerText = 'Casa en caché…';
+      houseBarFill.style.width = '100%';
+      houseBarPct.innerText = 'Instantáneo';
+      processHouseholdBuffer(buffer);
+      return;
+    }
+
+    if (type === 'progress') {
+      const pct = total > 0 ? (loaded / total) * 100 : 0;
+      houseBarFill.style.width = pct.toFixed(1) + '%';
+      const mb   = (loaded   / 1048576).toFixed(1);
+      const tbMb = total > 0 ? (total / 1048576).toFixed(1) : '?';
+      houseBarPct.innerText = `${mb} / ${tbMb} MB`;
+    }
+
+    if (type === 'done') {
+      worker.terminate();
+      processHouseholdBuffer(buffer);
+    }
+
+    if (type === 'error') {
+      console.error('[household worker]', msg);
+      houseBarEl.querySelector('#house-bar-label').innerText = 'Error';
+      houseBarFill.style.background = '#f55';
+      houseBarPct.innerText = msg;
+    }
+  };
+
+  function processHouseholdBuffer(buffer) {
+    const resourcePath = new URL('./', location.href).href;
+    gltfLoader.parse(buffer, resourcePath,
+      gltf => {
+        const root = gltf.scene;
+
+        // Auto-fit a ~30 unidades
+        const box   = new THREE.Box3().setFromObject(root);
+        const size  = box.getSize(new THREE.Vector3());
+        root.scale.setScalar(30 / Math.max(size.x, size.y, size.z));
+
+        const box2   = new THREE.Box3().setFromObject(root);
+        const center = box2.getCenter(new THREE.Vector3());
+        root.position.set(-center.x, -box2.min.y, -center.z);
+
+        const size2 = box2.getSize(new THREE.Vector3());
+        bounds = {
+          minX: -size2.x * 0.44, maxX: size2.x * 0.44,
+          minZ: -size2.z * 0.44, maxZ: size2.z * 0.44,
+        };
+
+        // Fade in suave
+        root.traverse(c => {
+          if (c.isMesh) {
+            c.castShadow = true; c.receiveShadow = true;
+            if (c.material) {
+              c.material = c.material.clone();
+              c.material.transparent = true;
+              c.material.opacity = 0;
+            }
+          }
+        });
+        scene.add(root);
+
+        let t = 0;
+        const fadeIn = setInterval(() => {
+          t += 0.04;
+          root.traverse(c => {
+            if (c.isMesh && c.material) c.material.opacity = Math.min(1, t);
+          });
+          if (t >= 1) {
+            clearInterval(fadeIn);
+            root.traverse(c => {
+              if (c.isMesh && c.material) c.material.transparent = false;
+            });
+            scene.remove(tempFloor);
+          }
+        }, 16);
+
+        houseBarEl.style.opacity = '0';
+        setTimeout(() => { houseBarEl.style.display = 'none'; }, 500);
+      },
+      err => console.error('[household parse]', err)
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  GAME LOOP
+// ═══════════════════════════════════════════════════════════════
+const clock = new THREE.Clock();
+const SPEED = 5;
+const tmpV  = new THREE.Vector3();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (alien) {
+    const fwd = (keys['w'] || keys['arrowup'])    ?  1
+              : (keys['s'] || keys['arrowdown'])   ? -1 : 0;
+    const rgt = (keys['d'] || keys['arrowright'])  ?  1
+              : (keys['a'] || keys['arrowleft'])    ? -1 : 0;
+
+    isMoving = (fwd !== 0 || rgt !== 0);
+
+    if (isMoving) {
+      const moveAngle = Math.atan2(rgt, fwd) + camAngle;
+      alienPos.x = Math.max(bounds.minX, Math.min(bounds.maxX, alienPos.x + Math.sin(moveAngle) * SPEED * dt));
+      alienPos.z = Math.max(bounds.minZ, Math.min(bounds.maxZ, alienPos.z + Math.cos(moveAngle) * SPEED * dt));
+
+      let diff = (-moveAngle) - alienRotY;
+      while (diff >  Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      alienRotY += diff * Math.min(1, dt * 12);
+      walkPhase += dt * 9;
+    }
+
+    const t = Date.now() * 0.001;
+    const bob    = isMoving ? Math.abs(Math.sin(walkPhase)) * 0.07  : Math.sin(t) * 0.015;
+    const lean   = isMoving ? Math.sin(walkPhase * 0.5) * 0.05      : 0;
+    const squish = isMoving ? 1 + Math.sin(walkPhase * 2) * 0.015   : 1;
+
+    alien.position.set(alienPos.x, alienPos.y + bob, alienPos.z);
+    alien.rotation.y = alienRotY;
+    alien.rotation.z = lean;
+    alien.scale.y = baseScaleY * squish;
+
+    // Camera
+    const horiz = Math.cos(camPitch) * camDist;
+    const vert  = Math.sin(camPitch) * camDist;
+    camera.position.lerp(tmpV.set(
+      alienPos.x + Math.sin(camAngle) * horiz,
+      alienPos.y + vert + 0.3,
+      alienPos.z + Math.cos(camAngle) * horiz
+    ), 0.1);
+    camTargetPos.lerp(tmpV.set(alienPos.x, alienPos.y + 0.7, alienPos.z), 0.15);
+    camera.lookAt(camTargetPos);
+  }
+
+  renderer.render(scene, camera);
+}
+
+tick();
+</script>
+</body>
+</html>
