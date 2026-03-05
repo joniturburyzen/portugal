@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Habitación 3D</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+  canvas { display: block; }
+  #controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
+    padding: 12px 24px; color: rgba(255,255,255,0.7); font-size: 13px;
+    letter-spacing: 0.5px; z-index: 10; pointer-events: none;
+    display: flex; gap: 20px; align-items: center;
+  }
+  #controls kbd {
+    background: rgba(255,255,255,0.15); border-radius: 4px;
+    padding: 2px 8px; font-family: monospace; font-size: 12px;
+    border: 1px solid rgba(255,255,255,0.2);
+  }
+  #loading {
+    position: fixed; inset: 0; background: #0a0a0a; display: flex;
+    align-items: center; justify-content: center; z-index: 100;
+    color: rgba(255,255,255,0.5); font-size: 14px; letter-spacing: 2px;
+    transition: opacity 0.8s; font-family: 'Segoe UI', sans-serif;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="loading">CARGANDO...</div>
+<div id="controls">
+  <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Mover</span>
+  <span><kbd>Espacio</kbd> Saltar</span>
+  <span><kbd>Ratón</kbd> Mirar</span>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ─── CONFIG ───
+const SPEED = 6;
+const JUMP_FORCE = 8;
+const GRAVITY = 20;
+const MOUSE_SENS = 0.002;
+const ROOM_W = 14, ROOM_H = 4, ROOM_D = 10;
+
+// ─── RENDERER ───
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputEncoding = THREE.sRGBEncoding;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1a2e, 0.02);
+
+// ─── CAMERA (third person) ───
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+let camAngleX = 0, camAngleY = 0.3;
+const camDist = 5;
+
+// ─── TEXTURES ───
+function makeCheckerTexture(c1, c2, size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const half = size / 2;
+  ctx.fillStyle = c1; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = c2;
+  ctx.fillRect(0, 0, half, half);
+  ctx.fillRect(half, half, half, half);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function makeNoiseTexture(base, variation, size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(size, size);
+  const r0 = parseInt(base.slice(1,3),16), g0 = parseInt(base.slice(3,5),16), b0 = parseInt(base.slice(5,7),16);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const v = (Math.random() - 0.5) * variation;
+    imageData.data[i] = Math.max(0, Math.min(255, r0 + v));
+    imageData.data[i+1] = Math.max(0, Math.min(255, g0 + v));
+    imageData.data[i+2] = Math.max(0, Math.min(255, b0 + v));
+    imageData.data[i+3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function makeWoodTexture(size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  for (let y = 0; y < size; y++) {
+    const v = Math.sin(y * 0.3) * 10 + Math.random() * 8;
+    const r = 120 + v, g = 75 + v * 0.6, b = 40 + v * 0.3;
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(0, y, size, 1);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+// ─── MATERIALS ───
+const floorTex = makeWoodTexture(512);
+floorTex.repeat.set(ROOM_W / 2, ROOM_D / 2);
+const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.7, metalness: 0.0 });
+
+const wallTex = makeNoiseTexture('#d4c8b0', 15, 256);
+wallTex.repeat.set(4, 2);
+const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.9, metalness: 0.0 });
+
+const ceilTex = makeNoiseTexture('#f0ece4', 8, 256);
+ceilTex.repeat.set(3, 3);
+const ceilMat = new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 0.95 });
+
+const darkWoodTex = makeWoodTexture(256);
+const furnitureMat = new THREE.MeshStandardMaterial({ map: darkWoodTex, roughness: 0.5, metalness: 0.05 });
+
+// ─── ROOM GEOMETRY ───
+// Floor
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM_W, ROOM_D), floorMat);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// Ceiling
+const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(ROOM_W, ROOM_D), ceilMat);
+ceiling.rotation.x = Math.PI / 2;
+ceiling.position.y = ROOM_H;
+scene.add(ceiling);
+
+// Walls
+function addWall(w, h, px, py, pz, ry) {
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(w, h), wallMat);
+  wall.position.set(px, py, pz);
+  wall.rotation.y = ry;
+  wall.receiveShadow = true;
+  scene.add(wall);
+}
+addWall(ROOM_W, ROOM_H, 0, ROOM_H/2, -ROOM_D/2, 0);          // back
+addWall(ROOM_W, ROOM_H, 0, ROOM_H/2, ROOM_D/2, Math.PI);      // front
+addWall(ROOM_D, ROOM_H, -ROOM_W/2, ROOM_H/2, 0, Math.PI/2);   // left
+addWall(ROOM_D, ROOM_H, ROOM_W/2, ROOM_H/2, 0, -Math.PI/2);   // right
+
+// ─── BASEBOARD ───
+function addBaseboard(w, px, pz, ry) {
+  const geo = new THREE.BoxGeometry(w, 0.15, 0.05);
+  const m = new THREE.Mesh(geo, furnitureMat);
+  m.position.set(px, 0.075, pz);
+  m.rotation.y = ry;
+  m.castShadow = true;
+  scene.add(m);
+}
+addBaseboard(ROOM_W, 0, -ROOM_D/2 + 0.025, 0);
+addBaseboard(ROOM_W, 0, ROOM_D/2 - 0.025, 0);
+addBaseboard(ROOM_D, -ROOM_W/2 + 0.025, 0, Math.PI/2);
+addBaseboard(ROOM_D, ROOM_W/2 - 0.025, 0, Math.PI/2);
+
+// ─── FURNITURE ───
+// Table
+function createTable(x, z) {
+  const group = new THREE.Group();
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2, 0.08, 1), furnitureMat);
+  top.position.y = 0.8; top.castShadow = true; top.receiveShadow = true;
+  group.add(top);
+  const legGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.8, 8);
+  [[-0.85, -0.4], [0.85, -0.4], [-0.85, 0.4], [0.85, 0.4]].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(legGeo, furnitureMat);
+    leg.position.set(lx, 0.4, lz);
+    leg.castShadow = true;
+    group.add(leg);
+  });
+  group.position.set(x, 0, z);
+  scene.add(group);
+  return group;
+}
+createTable(-4, -3);
+
+// Chair
+function createChair(x, z, rotY) {
+  const group = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.05, 0.5), furnitureMat);
+  seat.position.y = 0.5; seat.castShadow = true;
+  group.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.05), furnitureMat);
+  back.position.set(0, 0.8, -0.225); back.castShadow = true;
+  group.add(back);
+  const legGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.5, 6);
+  [[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2]].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(legGeo, furnitureMat);
+    leg.position.set(lx, 0.25, lz); leg.castShadow = true;
+    group.add(leg);
+  });
+  group.position.set(x, 0, z);
+  group.rotation.y = rotY || 0;
+  scene.add(group);
+}
+createChair(-4, -2, 0);
+createChair(-4.8, -3, Math.PI / 2);
+
+// Bookshelf
+function createBookshelf(x, z, rotY) {
+  const group = new THREE.Group();
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.5, 0.4), new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.6 }));
+  frame.position.y = 1.25; frame.castShadow = true; frame.receiveShadow = true;
+  group.add(frame);
+  const colors = [0xc0392b, 0x2980b9, 0x27ae60, 0xf39c12, 0x8e44ad, 0xe74c3c, 0x1abc9c, 0xd35400];
+  for (let shelf = 0; shelf < 4; shelf++) {
+    const sy = 0.3 + shelf * 0.55;
+    for (let b = 0; b < 5; b++) {
+      const bh = 0.3 + Math.random() * 0.15;
+      const bw = 0.08 + Math.random() * 0.06;
+      const book = new THREE.Mesh(
+        new THREE.BoxGeometry(bw, bh, 0.25),
+        new THREE.MeshStandardMaterial({ color: colors[Math.floor(Math.random() * colors.length)], roughness: 0.8 })
+      );
+      book.position.set(-0.5 + b * 0.22 + Math.random() * 0.05, sy + bh / 2, 0);
+      book.castShadow = true;
+      group.add(book);
+    }
+  }
+  group.position.set(x, 0, z);
+  group.rotation.y = rotY || 0;
+  scene.add(group);
+}
+createBookshelf(ROOM_W/2 - 0.3, 0, -Math.PI/2);
+
+// Rug
+const rugGeo = new THREE.CircleGeometry(2, 32);
+const rugMat = new THREE.MeshStandardMaterial({ color: 0x8b2500, roughness: 0.95 });
+const rug = new THREE.Mesh(rugGeo, rugMat);
+rug.rotation.x = -Math.PI / 2;
+rug.position.set(0, 0.005, 0);
+rug.receiveShadow = true;
+scene.add(rug);
+
+// Rug pattern (inner circle)
+const rugInner = new THREE.Mesh(
+  new THREE.RingGeometry(0.8, 1.5, 32),
+  new THREE.MeshStandardMaterial({ color: 0xd4a056, roughness: 0.9 })
+);
+rugInner.rotation.x = -Math.PI / 2;
+rugInner.position.set(0, 0.007, 0);
+scene.add(rugInner);
+
+// Lamp
+function createLamp(x, z) {
+  const group = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 0.05, 16), new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8 }));
+  base.position.y = 0.025; group.add(base);
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.5, 8), new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.9 }));
+  pole.position.y = 0.8; group.add(pole);
+  const shade = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.3, 0.35, 16, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0xfff5e0, side: THREE.DoubleSide, transparent: true, opacity: 0.85 })
+  );
+  shade.position.y = 1.55; group.add(shade);
+  const bulbLight = new THREE.PointLight(0xffe4b5, 0.8, 6);
+  bulbLight.position.y = 1.5;
+  bulbLight.castShadow = true;
+  bulbLight.shadow.mapSize.set(512, 512);
+  group.add(bulbLight);
+  group.position.set(x, 0, z);
+  scene.add(group);
+}
+createLamp(-5.5, 3.5);
+createLamp(5.5, -3.5);
+
+// Picture frames on wall
+function createPicture(x, y, z, ry, color) {
+  const group = new THREE.Group();
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.8, 0.05), new THREE.MeshStandardMaterial({ color: 0x3d2b1f, roughness: 0.4, metalness: 0.1 }));
+  group.add(frame);
+  const canvas2 = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.6), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
+  canvas2.position.z = 0.03;
+  group.add(canvas2);
+  group.position.set(x, y, z);
+  group.rotation.y = ry;
+  group.castShadow = true;
+  scene.add(group);
+}
+createPicture(0, 2.2, -ROOM_D/2 + 0.06, 0, 0x2c5f7c);
+createPicture(-3, 2.5, -ROOM_D/2 + 0.06, 0, 0x7c4a2c);
+
+// ─── LIGHTING ───
+// Ambient
+scene.add(new THREE.AmbientLight(0x404050, 0.3));
+
+// Main overhead
+const mainLight = new THREE.PointLight(0xffeedd, 0.6, 20);
+mainLight.position.set(0, ROOM_H - 0.3, 0);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.set(1024, 1024);
+mainLight.shadow.radius = 4;
+scene.add(mainLight);
+
+// Warm fill
+const fillLight = new THREE.PointLight(0xffcc88, 0.3, 15);
+fillLight.position.set(3, 2, 2);
+scene.add(fillLight);
+
+// Cool accent
+const accentLight = new THREE.PointLight(0x88aaff, 0.15, 12);
+accentLight.position.set(-4, 3, -3);
+scene.add(accentLight);
+
+// ─── PLAYER ───
+const playerGroup = new THREE.Group();
+
+// Body
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2c3e50, roughness: 0.7 });
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.2, 0.7, 12), bodyMat);
+body.position.y = 0.75;
+body.castShadow = true;
+playerGroup.add(body);
+
+// Head
+const headMat = new THREE.MeshStandardMaterial({ color: 0xf5d0a9, roughness: 0.6 });
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), headMat);
+head.position.y = 1.3;
+head.castShadow = true;
+playerGroup.add(head);
+
+// Arms
+const armMat = new THREE.MeshStandardMaterial({ color: 0x34495e, roughness: 0.7 });
+const armGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.5, 8);
+const leftArm = new THREE.Mesh(armGeo, armMat);
+leftArm.position.set(-0.32, 0.75, 0);
+leftArm.castShadow = true;
+playerGroup.add(leftArm);
+const rightArm = new THREE.Mesh(armGeo, armMat);
+rightArm.position.set(0.32, 0.75, 0);
+rightArm.castShadow = true;
+playerGroup.add(rightArm);
+
+// Legs
+const legMat = new THREE.MeshStandardMaterial({ color: 0x1a252f, roughness: 0.7 });
+const legGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.4, 8);
+const leftLeg = new THREE.Mesh(legGeo, legMat);
+leftLeg.position.set(-0.1, 0.2, 0);
+leftLeg.castShadow = true;
+playerGroup.add(leftLeg);
+const rightLeg = new THREE.Mesh(legGeo, legMat);
+rightLeg.position.set(0.1, 0.2, 0);
+rightLeg.castShadow = true;
+playerGroup.add(rightLeg);
+
+playerGroup.position.set(0, 0, 0);
+scene.add(playerGroup);
+
+// ─── PLAYER PHYSICS ───
+const playerVel = { x: 0, y: 0, z: 0 };
+let onGround = true;
+const playerPos = playerGroup.position;
+
+// ─── INPUT ───
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+let pointerLocked = false;
+renderer.domElement.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === renderer.domElement;
+});
+document.addEventListener('mousemove', e => {
+  if (!pointerLocked) return;
+  camAngleX -= e.movementX * MOUSE_SENS;
+  camAngleY = Math.max(-0.5, Math.min(1.2, camAngleY + e.movementY * MOUSE_SENS));
+});
+
+// ─── COLLISION ───
+const MARGIN = 0.35;
+const BOUNDS = {
+  minX: -ROOM_W / 2 + MARGIN,
+  maxX: ROOM_W / 2 - MARGIN,
+  minZ: -ROOM_D / 2 + MARGIN,
+  maxZ: ROOM_D / 2 - MARGIN
+};
+
+function clampPosition() {
+  playerPos.x = Math.max(BOUNDS.minX, Math.min(BOUNDS.maxX, playerPos.x));
+  playerPos.z = Math.max(BOUNDS.minZ, Math.min(BOUNDS.maxZ, playerPos.z));
+}
+
+// ─── ANIMATION ───
+let walkTime = 0;
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  // ── Movement ──
+  const moveDir = new THREE.Vector3();
+  if (keys['KeyW'] || keys['ArrowUp']) moveDir.z -= 1;
+  if (keys['KeyS'] || keys['ArrowDown']) moveDir.z += 1;
+  if (keys['KeyA'] || keys['ArrowLeft']) moveDir.x -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) moveDir.x += 1;
+
+  const isMoving = moveDir.length() > 0;
+  if (isMoving) {
+    moveDir.normalize();
+    // Rotate movement relative to camera angle
+    const sin = Math.sin(camAngleX), cos = Math.cos(camAngleX);
+    const rx = moveDir.x * cos - moveDir.z * sin;
+    const rz = moveDir.x * sin + moveDir.z * cos;
+    playerPos.x += rx * SPEED * dt;
+    playerPos.z += rz * SPEED * dt;
+
+    // Face movement direction
+    const targetAngle = Math.atan2(rx, rz);
+    let diff = targetAngle - playerGroup.rotation.y;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    playerGroup.rotation.y += diff * 10 * dt;
+  }
+
+  // Jump
+  if ((keys['Space'] || keys['KeySpace']) && onGround) {
+    playerVel.y = JUMP_FORCE;
+    onGround = false;
+  }
+
+  // Gravity
+  playerVel.y -= GRAVITY * dt;
+  playerPos.y += playerVel.y * dt;
+  if (playerPos.y <= 0) {
+    playerPos.y = 0;
+    playerVel.y = 0;
+    onGround = true;
+  }
+
+  clampPosition();
+
+  // ── Walk animation ──
+  if (isMoving && onGround) {
+    walkTime += dt * 10;
+    leftArm.rotation.x = Math.sin(walkTime) * 0.5;
+    rightArm.rotation.x = -Math.sin(walkTime) * 0.5;
+    leftLeg.rotation.x = -Math.sin(walkTime) * 0.4;
+    rightLeg.rotation.x = Math.sin(walkTime) * 0.4;
+    body.position.y = 0.75 + Math.abs(Math.sin(walkTime * 2)) * 0.03;
+  } else {
+    leftArm.rotation.x *= 0.9;
+    rightArm.rotation.x *= 0.9;
+    leftLeg.rotation.x *= 0.9;
+    rightLeg.rotation.x *= 0.9;
+    body.position.y += (0.75 - body.position.y) * 0.1;
+  }
+
+  // ── Camera ──
+  const camX = playerPos.x + Math.sin(camAngleX) * camDist * Math.cos(camAngleY);
+  const camY = playerPos.y + 1.2 + Math.sin(camAngleY) * camDist;
+  const camZ = playerPos.z + Math.cos(camAngleX) * camDist * Math.cos(camAngleY);
+  camera.position.set(camX, camY, camZ);
+  camera.lookAt(playerPos.x, playerPos.y + 1, playerPos.z);
+
+  renderer.render(scene, camera);
+}
+
+// ─── RESIZE ───
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── START ───
+setTimeout(() => document.getElementById('loading').classList.add('hidden'), 500);
+animate();
+</script>
+</body>
+</html>
